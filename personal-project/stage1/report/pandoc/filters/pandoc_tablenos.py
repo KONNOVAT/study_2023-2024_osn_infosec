@@ -1,9 +1,9 @@
 #! /usr/bin/env python
 
-"""pandoc-fignos: a pandoc filter that inserts figure nos. and refs."""
+"""pandoc-tablenos: a pandoc filter that inserts table nos. and refs."""
 
 
-__version__ = '2.4.0'
+__version__ = '2.3.0'
 
 
 # Copyright 2015-2020 Thomas J. Duck.
@@ -26,12 +26,12 @@ __version__ = '2.4.0'
 #
 # The basic idea is to scan the document twice in order to:
 #
-#   1. Insert text for the figure number in each figure caption.
-#      For LaTeX, insert \label{...} instead.  The figure ids
-#      and associated figure numbers are stored in the global
-#      target tracker.
+#   1. Insert text for the table number in each table caption.
+#      For LaTeX, insert \label{...} instead.  The table labels
+#      and associated table numbers are stored in the global
+#      targets tracker.
 #
-#   2. Replace each reference with a figure number.  For LaTeX,
+#   2. Replace each reference with a table number.  For LaTeX,
 #      replace with \ref{...} instead.
 #
 # This is followed by injecting header code as needed for certain output
@@ -40,7 +40,6 @@ __version__ = '2.4.0'
 
 # pylint: disable=invalid-name
 
-import sys
 import re
 import functools
 import argparse
@@ -50,9 +49,7 @@ import textwrap
 import uuid
 
 from pandocfilters import walk
-from pandocfilters import Image, Div
-from pandocfilters import Math, Str, Space, Para, RawBlock, RawInline
-from pandocfilters import Span
+from pandocfilters import Str, Space, RawBlock, RawInline, Math, Span
 
 import pandocxnos
 from pandocxnos import PandocAttributes
@@ -60,26 +57,22 @@ from pandocxnos import STRTYPES, STDIN, STDOUT, STDERR
 from pandocxnos import NBSP
 from pandocxnos import elt, check_bool, get_meta, extract_attrs
 from pandocxnos import repair_refs, process_refs_factory, replace_refs_factory
-from pandocxnos import attach_attrs_factory, detach_attrs_factory
 from pandocxnos import insert_secnos_factory, delete_secnos_factory
+from pandocxnos import attach_attrs_factory, detach_attrs_factory
 from pandocxnos import version
 
-if sys.version_info > (3,):
-    from urllib.request import unquote
-else:
-    from urllib import unquote  # pylint: disable=no-name-in-module
 
-# Compiled regular expression for matching labels
-LABEL_PATTERN = re.compile(r'(fig:[\w/-]*)')
+# Patterns for matching labels and references
+LABEL_PATTERN = re.compile(r'(tbl:[\w/-]*)')
 
 # Meta variables; may be reset elsewhere
-captionname = 'Figure'  # The caption name
+captionname = 'Table'   # The caption name
 separator = 'colon'     # The caption separator
 cleveref = False        # Flags that clever references should be used
-capitalise = False      # Flags that plusname should be capitalised
-plusname = ['fig.', 'figs.']      # Sets names for mid-sentence references
-starname = ['Figure', 'Figures']  # Sets names for references at sentence start
-numbersections = False  # Flags that figures should be numbered by section
+capitalise = False      # Default setting for capitalizing plusname
+plusname = ['table', 'tables']  # Sets names for mid-sentence references
+starname = ['Table', 'Tables']  # Sets names for references at sentence start
+numbersections = False  # Flags that tables should be numbered by section
 secoffset = 0           # Section number offset
 warninglevel = 2        # 0 - no warnings; 1 - some warnings; 2 - all warnings
 
@@ -93,83 +86,109 @@ captionname_changed = False     # Flags the caption name changed
 separator_changed = False       # Flags the caption separator changed
 plusname_changed = False        # Flags that the plus name changed
 starname_changed = False        # Flags that the star name changed
-has_unnumbered_figures = False  # Flags unnumbered figures were found
-has_tagged_figures = False      # Flags a tagged figure was found
+has_unnumbered_tables = False   # Flags unnumbered tables were found
+has_tagged_tables = False       # Flags a tagged table was found
 
 PANDOCVERSION = None
+AttrTable = None
 
 
 # Actions --------------------------------------------------------------------
 
-def _extract_attrs(x, n):
-    """Extracts attributes for an image in the element list `x`.  The
-    attributes begin at index `n`.  Extracted elements are deleted
-    from the list.
-    """
-    try:  #  Try the standard call from pandocxnos first
-        return extract_attrs(x, n)
+# pylint: disable=unused-argument
+def attach_attrs_table(key, value, fmt, meta):
+    """Extracts attributes and attaches them to element."""
 
-    except (ValueError, IndexError):
+    # We can't use attach_attrs_factory() because Table is a block-level element
 
-        if version(PANDOCVERSION) < version('1.16'):
-            # Look for attributes attached to the image path, as occurs with
-            # image references for pandoc < 1.16 (pandoc-fignos Issue #14).
-            # See http://pandoc.org/MANUAL.html#images for the syntax.
-            # Note: This code does not handle the "optional title" for
-            # image references (search for link_attributes in pandoc's docs).
-            assert x[n-1]['t'] == 'Image'
-            image = x[n-1]
-            s = image['c'][-1][0]
-            if '%20%7B' in s:
-                path = s[:s.index('%20%7B')]
-                attrstr = unquote(s[s.index('%7B'):])
-                image['c'][-1][0] = path  # Remove attr string from the path
-                return PandocAttributes(attrstr.strip(), 'markdown')
-        raise
+    # Tables are attributed as of pandoc 2.10.  There is no native mechanism
+    # (yet) to populate those attributes.  This is coming.  See the
+    # Revision history for pandoc 2.10.1 at https://pandoc.org/releases.html.
 
+    if key in ['Table']:
+        if version(PANDOCVERSION) < version('2.10'):
+            assert len(value) == 5
+            caption = value[0]  # caption, align, x, head, body
+        elif version(PANDOCVERSION) < version('2.11'):
+            assert len(value) == 6
+            assert value[1]['t'] == 'Caption'
+            if value[1]['c'][1]:
+                assert value[1]['c'][1][0]['t'] == 'Plain'
+                caption = value[1]['c'][1][0]['c']
+            else:
+                return  # There is no caption
+        else:
+            assert len(value) == 6
+            assert value[1][0] is None
+            if value[1][1]:
+                assert value[1][1][0]['t'] == 'Plain'
+                caption = value[1][1][0]['c']
+            else:
+                return  # There is no caption
 
-def _process_figure(key, value, fmt):
-    """Processes a figure.  Returns a dict containing figure properties.
+        # Set n to the index where the attributes start
+        n = 0
+        while n < len(caption) and not \
+          (caption[n]['t'] == 'Str' and caption[n]['c'].startswith('{')):
+            n += 1
 
-    Parameters:
+        try:
+            # Read the attributes from the caption
+            attrs = extract_attrs(caption, n)
+            if version(PANDOCVERSION) < version('2.10'):
+                # Insert the attributes
+                value.insert(0, attrs.list)
+            else:
+                # Overwrite the attributes
+                value[0] = attrs.list
+        except (ValueError, IndexError):
+            pass
 
-      key - 'Para' (for a normal figure) or 'Div'
-      value - the content of the figure
-      fmt - the output format ('tex', 'html', ...)
-    """
+# pylint: disable=too-many-branches
+def _process_table(value, fmt):
+    """Processes the table.  Returns a dict containing table properties."""
 
     # pylint: disable=global-statement
     global cursec    # Current section being processed
-    global Ntargets  # Number of targets in current section (or document)
-    global has_unnumbered_figures  # Flags that unnumbered figures were found
+    global Ntargets  # Number of refs in current section (or document)
+    global has_unnumbered_tables  # Flags unnumbered tables were found
 
     # Initialize the return value
-    fig = {'is_unnumbered': False,
-           'is_unreferenceable': False,
-           'is_tagged': False}
+    table = {'is_unnumbered': False,
+             'is_unreferenceable': False,
+             'is_tagged': False}
 
     # Bail out if there are no attributes
-    if key == 'Para' and len(value[0]['c']) == 2:
-        has_unnumbered_figures = True
-        fig.update({'is_unnumbered': True, 'is_unreferenceable': True})
-        return fig
+    if len(value) == 5:
+        has_unnumbered_tables = True
+        table.update({'is_unnumbered': True, 'is_unreferenceable': True})
+        return table
 
-    # Parse the figure
-    attrs = fig['attrs'] = \
-      PandocAttributes(value[0]['c'][0] if key == 'Para' else value[0],
-                       'pandoc')
-    fig['caption'] = value[0]['c'][1] if key == 'Para' else None
+    # Parse the table
+    attrs = table['attrs'] = PandocAttributes(value[0], 'pandoc')
+    if version(PANDOCVERSION) < version('2.10'):
+        table['caption'] = value[1]
+    elif version(PANDOCVERSION) < version('2.11'):
+        if value[1]['c'][1]:
+            table['caption'] = value[1]['c'][1][0]['c']
+        else:
+            table['caption'] = []
+    else:
+        if value[1][1]:
+            table['caption'] = value[1][1][0]['c']
+        else:
+            table['caption'] = []
 
     # Bail out if the label does not conform to expectations
     if not LABEL_PATTERN.match(attrs.id):
-        has_unnumbered_figures = True
-        fig.update({'is_unnumbered': True, 'is_unreferenceable': True})
-        return fig
+        has_unnumbered_tables = True
+        table.update({'is_unnumbered':True, 'is_unreferenceable':True})
+        return table
 
-    # Identify unreferenceable figures
-    if attrs.id == 'fig:':
-        attrs.id += str(uuid.uuid4())
-        fig['is_unreferenceable'] = True
+    # Identify unreferenceable tables
+    if attrs.id == 'tbl:': # Make up a unique description
+        attrs.id = 'tbl:' + str(uuid.uuid4())
+        table['is_unreferenceable'] = True
 
     # Update the current section number
     if attrs['secno'] != cursec:  # The section number changed
@@ -184,17 +203,14 @@ def _process_figure(key, value, fmt):
     # Pandoc's --number-sections supports section numbering latex/pdf, html,
     # epub, and docx
     if numbersections:
-        # Latex/pdf supports equation numbers by section natively.  For the
-        # other formats we must hard-code in figure numbers by section as
-        # tags.
         if fmt in ['html', 'html4', 'html5', 'epub', 'epub2', 'epub3',
                    'docx'] and \
           'tag' not in attrs:
             attrs['tag'] = str(cursec+secoffset) + '.' + str(Ntargets)
 
-    # Update the global targets tracker
-    fig['is_tagged'] = 'tag' in attrs
-    if fig['is_tagged']:  # ... then save the tag
+    # Save reference information
+    table['is_tagged'] = 'tag' in attrs
+    if table['is_tagged']:
         # Remove any surrounding quotes
         if attrs['tag'][0] == '"' and attrs['tag'][-1] == '"':
             attrs['tag'] = attrs['tag'].strip('"')
@@ -202,84 +218,118 @@ def _process_figure(key, value, fmt):
             attrs['tag'] = attrs['tag'].strip("'")
         targets[attrs.id] = pandocxnos.Target(attrs['tag'], cursec,
                                               attrs.id in targets)
-    else:  # ... then save the figure number
+    else:  # ... then save the table number
         targets[attrs.id] = pandocxnos.Target(Ntargets, cursec,
                                               attrs.id in targets)
 
-    return fig
+    return table
 
-def _adjust_caption(fmt, fig, value):
+
+# pylint: disable=too-many-statements
+def _adjust_caption(fmt, table, value):
     """Adjusts the caption."""
-    attrs, caption = fig['attrs'], fig['caption']
-    if fmt in ['latex', 'beamer']:  # Append a \label if this is referenceable
-        if version(PANDOCVERSION) < version('1.17') and \
-          not fig['is_unreferenceable']:
-            # pandoc >= 1.17 installs \label for us
-            value[0]['c'][1] += \
-              [RawInline('tex', r'\protect\label{%s}'%attrs.id)]
+    attrs, caption = table['attrs'], table['caption']
+    num = targets[attrs.id].num
+    if fmt in['latex', 'beamer']:  # Append a \label if this is referenceable
+        if not table['is_unreferenceable']:
+            tmp = [RawInline('tex', r'\label{%s}'%attrs.id)]
+            if version(PANDOCVERSION) < version('2.10'):
+                value[1] += tmp
+            elif version(PANDOCVERSION) < version('2.11'):
+                value[1]['c'][1][0]['c'] += tmp
+            else:
+                value[1][1][0]['c'] += tmp
+
     else:  # Hard-code in the caption name and number/tag
-        if fig['is_unnumbered']:
-            return
         sep = {'none':'', 'colon':':', 'period':'.', 'space':' ',
                'quad':u'\u2000', 'newline':'\n'}[separator]
 
-        num = targets[attrs.id].num
-        if isinstance(num, int):  # Numbered target
+        if isinstance(num, int):  # Numbered reference
             if fmt in ['html', 'html4', 'html5', 'epub', 'epub2', 'epub3']:
-                value[0]['c'][1] = [RawInline('html', r'<span>'),
-                                    Str(captionname+NBSP),
-                                    Str('%d%s' % (num, sep)),
-                                    RawInline('html', r'</span>')]
+                tmp = [RawInline('html', r'<span>'),
+                       Str(captionname+NBSP), Str('%d%s'%(num, sep)),
+                       RawInline('html', r'</span>')]
+                if version(PANDOCVERSION) < version('2.10'):
+                    value[1] = tmp
+                elif version(PANDOCVERSION) < version('2.11'):
+                    value[1]['c'][1][0]['c'] = tmp
+                else:
+                    value[1][1][0]['c'] = tmp
             else:
-                value[0]['c'][1] = [Str(captionname+NBSP),
-                                    Str('%d%s' % (num, sep))]
-        else:  # Tagged target
-            if num.startswith('$') and num.endswith('$'):  # Math
+                tmp = [Str(captionname+NBSP), Str('%d%s'%(num, sep))]
+                if version(PANDOCVERSION) < version('2.10'):
+                    value[1] = tmp
+                elif version(PANDOCVERSION) < version('2.11'):
+                    value[1]['c'][1][0]['c'] = tmp
+                else:
+                    value[1][1][0]['c'] = tmp
+        else:  # Tagged reference
+            assert isinstance(num, STRTYPES)
+            if num.startswith('$') and num.endswith('$'):
                 math = num.replace(' ', r'\ ')[1:-1]
                 els = [Math({"t":"InlineMath", "c":[]}, math), Str(sep)]
             else:  # Text
-                els = [Str(num+sep)]
+                els = [Str(num + sep)]
             if fmt in ['html', 'html4', 'html5', 'epub', 'epub2', 'epub3']:
-                value[0]['c'][1] = \
-                  [RawInline('html', r'<span>'), Str(captionname+NBSP)] + \
-                  els + [RawInline('html', r'</span>')]
+                tmp = [RawInline('html', r'<span>'),
+                       Str(captionname+NBSP)] + \
+                      els + [RawInline('html', r'</span>')]
+                if version(PANDOCVERSION) < version('2.10'):
+                    value[1] = tmp
+                elif version(PANDOCVERSION) < version('2.11'):
+                    value[1]['c'][1][0]['c'] = tmp
+                else:
+                    value[1][1][0]['c'] = tmp
             else:
-                value[0]['c'][1] = [Str(captionname+NBSP)] + els
-        value[0]['c'][1] += [Space()] + list(caption)
+                tmp = [Str(captionname+NBSP)] + els
+                if version(PANDOCVERSION) < version('2.10'):
+                    value[1] = tmp
+                elif version(PANDOCVERSION) < version('2.11'):
+                    value[1]['c'][1][0]['c'] = tmp
+                else:
+                    value[1][1][0]['c'] = tmp
 
-def _add_markup(fmt, fig, value):
+        tmp = [Space()] + list(caption)
+        if version(PANDOCVERSION) < version('2.10'):
+            value[1] += tmp
+        elif version(PANDOCVERSION) < version('2.11'):
+            value[1]['c'][1][0]['c'] += tmp
+        else:
+            value[1][1][0]['c'] += tmp
+
+def _add_markup(fmt, table, value):
     """Adds markup to the output."""
 
     # pylint: disable=global-statement
-    global has_tagged_figures  # Flags a tagged figure was found
+    global has_tagged_tables  # Flags a tagged tables was found
 
-    if fig['is_unnumbered']:
+    if table['is_unnumbered']:
         if fmt in ['latex', 'beamer']:
-            # Use the no-prefix-figure-caption environment
-            return [RawBlock('tex', r'\begin{fignos:no-prefix-figure-caption}'),
-                    Para(value),
-                    RawBlock('tex', r'\end{fignos:no-prefix-figure-caption}')]
+            # Use the no-prefix-table-caption environment
+            return [RawBlock('tex',
+                             r'\begin{tablenos:no-prefix-table-caption}'),
+                    Table(*(value if len(value) == 5 or \
+                            version(PANDOCVERSION) >= version('2.10') \
+                            else value[1:])),
+                    RawBlock('tex', r'\end{tablenos:no-prefix-table-caption}')]
         return None  # Nothing to do
 
-    attrs = fig['attrs']
+    attrs = table['attrs']
     ret = None
 
     if fmt in ['latex', 'beamer']:
-        if fig['is_tagged']:  # A figure cannot be tagged if it is unnumbered
-            # Use the tagged-figure environment
-            has_tagged_figures = True
-            ret = [RawBlock('tex', r'\begin{fignos:tagged-figure}[%s]' % \
-                            str(targets[attrs.id].num)),
-                   Para(value),
-                   RawBlock('tex', r'\end{fignos:tagged-figure}')]
+        if table['is_tagged']:  # A table cannot be tagged if it is unnumbered
+            has_tagged_tables = True
+            ret = [RawBlock('tex', r'\begin{tablenos:tagged-table}[%s]' % \
+                            targets[attrs.id].num),
+                   AttrTable(*value),
+                   RawBlock('tex', r'\end{tablenos:tagged-table}')]
     elif fmt in ('html', 'html4', 'html5', 'epub', 'epub2', 'epub3'):
         if LABEL_PATTERN.match(attrs.id):
-            pre = RawBlock('html', '<div id="%s" class="fignos">'%attrs.id)
+            # Enclose table in hidden div
+            pre = RawBlock('html', '<div id="%s" class="tablenos">'%attrs.id)
             post = RawBlock('html', '</div>')
-            ret = [pre, Para(value), post]
-            # Eliminate the id from the Image
-            attrs.id = ''
-            value[0]['c'][0] = attrs.list
+            ret = [pre, AttrTable(*value), post]
     elif fmt == 'docx':
         # As per http://officeopenxml.com/WPhyperlink.php
         bookmarkstart = \
@@ -288,92 +338,90 @@ def _add_markup(fmt, fig, value):
                    %attrs.id)
         bookmarkend = \
           RawBlock('openxml', '<w:bookmarkEnd w:id="0"/>')
-        ret = [bookmarkstart, Para(value), bookmarkend]
+        ret = [bookmarkstart, AttrTable(*value), bookmarkend]
     return ret
 
-def process_figures(key, value, fmt, meta):  # pylint: disable=unused-argument
-    """Processes the figures."""
 
-    # Process figures wrapped in Para elements
-    if key == 'Para' and len(value) == 1 and \
-      value[0]['t'] == 'Image' and value[0]['c'][-1][1].startswith('fig:'):
+# pylint: disable=unused-argument, too-many-return-statements
+def process_tables(key, value, fmt, meta):
+    """Processes the attributed tables."""
 
-        # Process the figure and add markup
-        fig = _process_figure(key, value, fmt)
-        if 'attrs' in fig:
-            _adjust_caption(fmt, fig, value)
-        return _add_markup(fmt, fig, value)
+    # Process block-level Table elements
+    if key == 'Table':
 
-    if key == 'Div' and LABEL_PATTERN.match(value[0][0]):
-        fig = _process_figure(key, value, fmt)
+        # Process the table
+        table = _process_table(value, fmt)
+        if 'attrs' in table and table['attrs'].id:
+            _adjust_caption(fmt, table, value)
+        return _add_markup(fmt, table, value)
 
     return None
 
 
 # TeX blocks -----------------------------------------------------------------
 
-# Define an environment that disables figure caption prefixes.  Counters
-# must be saved and later restored.  The \thefigure and \theHfigure counter
+# Define an environment that disables table caption prefixes.  Counters
+# must be saved and later restored.  The \thetable and \theHtable counter
 # must be set to something unique so that duplicate internal names are avoided
 # (see Sect. 3.2 of
 # http://ctan.mirror.rafal.ca/macros/latex/contrib/hyperref/doc/manual.html).
 NO_PREFIX_CAPTION_ENV_TEX = r"""
-%% pandoc-fignos: environment to disable figure caption prefixes
+%% pandoc-tablenos: environment to disable table caption prefixes
 \makeatletter
-\newcounter{figno}
-\newenvironment{fignos:no-prefix-figure-caption}{
+\newcounter{tableno}
+\newenvironment{tablenos:no-prefix-table-caption}{
   \caption@ifcompatibility{}{
-    \let\oldthefigure\thefigure
-    \let\oldtheHfigure\theHfigure
-    \renewcommand{\thefigure}{figno:\thefigno}
-    \renewcommand{\theHfigure}{figno:\thefigno}
-    \stepcounter{figno}
+    \let\oldthetable\thetable
+    \let\oldtheHtable\theHtable
+    \renewcommand{\thetable}{tableno:\thetableno}
+    \renewcommand{\theHtable}{tableno:\thetableno}
+    \stepcounter{tableno}
     \captionsetup{labelformat=empty}
   }
 }{
   \caption@ifcompatibility{}{
     \captionsetup{labelformat=default}
-    \let\thefigure\oldthefigure
-    \let\theHfigure\oldtheHfigure
-    \addtocounter{figure}{-1}
+    \let\thetable\oldthetable
+    \let\theHtable\oldtheHtable
+    \addtocounter{table}{-1}
   }
 }
 \makeatother
 """
 
-# Define an environment for tagged figures
-TAGGED_FIGURE_ENV_TEX = r"""
-%% pandoc-fignos: environment for tagged figures
-\newenvironment{fignos:tagged-figure}[1][]{
-  \let\oldthefigure\thefigure
-  \let\oldtheHfigure\theHfigure
-  \renewcommand{\thefigure}{#1}
-  \renewcommand{\theHfigure}{#1}
+# Define an environment for tagged tables
+TAGGED_TABLE_ENV_TEX = r"""
+%% pandoc-tablenos: environment for tagged tables
+\newenvironment{tablenos:tagged-table}[1][]{
+  \let\oldthetable\thetable
+  \let\oldtheHtable\theHtable
+  \renewcommand{\thetable}{#1}
+  \renewcommand{\theHtable}{#1}
 }{
-  \let\thefigure\oldthefigure
-  \let\theHfigure\oldtheHfigure
-  \addtocounter{figure}{-1}
+  \let\thetable\oldthetable
+  \let\theHtable\oldtheHtable
+  \addtocounter{table}{-1}
 }
 """
 
-# Reset the caption name; i.e. change "Figure" at the beginning of a caption
+# Reset the caption name; i.e. change "Table" at the beginning of a caption
 # to something else.
 CAPTION_NAME_TEX = r"""
-%% pandoc-fignos: change the caption name
-\renewcommand{\figurename}{%s}
+%% pandoc-tablenos: change the caption name
+\renewcommand{\tablename}{%s}
 """
 
-# Reset the label separator; i.e. change the colon after "Figure 1:" to
+# Reset the label separator; i.e. change the colon after "Table 1:" to
 # something else.
 CAPTION_SEPARATOR_TEX = r"""
-%% pandoc-fignos: change the caption separator
-\captionsetup[figure]{labelsep=%s}
+%% pandoc-tablenos: change the caption separator
+\captionsetup[table]{labelsep=%s}
 """
 
-# Number figures by section
+# Define some tex to number tables by section
 NUMBER_BY_SECTION_TEX = r"""
-%% pandoc-fignos: number figures by section
-\numberwithin{figure}{section}
+%% pandoc-tablenos: number tables by section
+\numberwithin{table}{section}
 """
 
 # Section number offset
@@ -407,44 +455,44 @@ def process(meta):
 
     # Read in the metadata fields and do some checking
 
-    for name in ['fignos-warning-level', 'xnos-warning-level']:
+    for name in ['tablenos-warning-level', 'xnos-warning-level']:
         if name in meta:
             warninglevel = int(get_meta(meta, name))
             pandocxnos.set_warning_level(warninglevel)
             break
 
-    metanames = ['fignos-warning-level', 'xnos-warning-level',
-                 'fignos-caption-name',
-                 'fignos-caption-separator', 'xnos-caption-separator',
-                 'fignos-cleveref', 'xnos-cleveref',
+    metanames = ['tablenos-warning-level', 'xnos-warning-level',
+                 'tablenos-caption-name',
+                 'tablenos-caption-separator', 'xnos-caption-separator',
+                 'tablenos-cleveref', 'xnos-cleveref',
                  'xnos-capitalise', 'xnos-capitalize',
-                 'fignos-plus-name', 'fignos-star-name',
-                 'fignos-number-by-section', 'xnos-number-by-section',
+                 'tablenos-plus-name', 'tablenos-star-name',
+                 'tablenos-number-by-section', 'xnos-number-by-section',
                  'xnos-number-offset']
 
     if warninglevel:
         for name in meta:
-            if (name.startswith('fignos') or name.startswith('xnos')) and \
+            if (name.startswith('tablenos') or name.startswith('xnos')) and \
               name not in metanames:
                 msg = textwrap.dedent("""
-                          pandoc-fignos: unknown meta variable "%s"
+                          pandoc-tablenos: unknown meta variable "%s"
                       """ % name)
                 STDERR.write(msg)
 
-    if 'fignos-caption-name' in meta:
+    if 'tablenos-caption-name' in meta:
         old_captionname = captionname
-        captionname = get_meta(meta, 'fignos-caption-name')
+        captionname = get_meta(meta, 'tablenos-caption-name')
         captionname_changed = captionname != old_captionname
         assert isinstance(captionname, STRTYPES)
 
-    for name in ['fignos-caption-separator', 'xnos-caption-separator']:
+    for name in ['tablenos-caption-separator', 'xnos-caption-separator']:
         if name in meta:
             old_separator = separator
             separator = get_meta(meta, name)
             if separator not in \
               ['none', 'colon', 'period', 'space', 'quad', 'newline']:
                 msg = textwrap.dedent("""
-                          pandoc-fignos: caption separator must be one of
+                          pandoc-tablenos: caption separator must be one of
                           none, colon, period, space, quad, or newline.
                       """ % name)
                 STDERR.write(msg)
@@ -452,24 +500,24 @@ def process(meta):
             separator_changed = separator != old_separator
             break
 
-    for name in ['fignos-cleveref', 'xnos-cleveref']:
+    for name in ['tablenos-cleveref', 'xnos-cleveref']:
         # 'xnos-cleveref' enables cleveref in all 3 of fignos/eqnos/tablenos
         if name in meta:
             cleveref = check_bool(get_meta(meta, name))
             break
 
-    for name in ['xnos-capitalise', 'xnos-capitalize']:
+    for name in ['xnos-capitalize', 'xnos-capitalise']:
         # 'xnos-capitalise' enables capitalise in all 3 of
         # fignos/eqnos/tablenos.  Since this uses an option in the caption
         # package, it is not possible to select between the three (use
-        # 'fignos-plus-name' instead.  'xnos-capitalize' is an alternative
+        # 'tablenos-plus-name' instead.  'xnos-capitalize' is an alternative
         # spelling
         if name in meta:
             capitalise = check_bool(get_meta(meta, name))
             break
 
-    if 'fignos-plus-name' in meta:
-        tmp = get_meta(meta, 'fignos-plus-name')
+    if 'tablenos-plus-name' in meta:
+        tmp = get_meta(meta, 'tablenos-plus-name')
         old_plusname = copy.deepcopy(plusname)
         if isinstance(tmp, list):  # The singular and plural forms were given
             plusname = tmp
@@ -482,8 +530,8 @@ def process(meta):
         if plusname_changed:
             starname = [name.title() for name in plusname]
 
-    if 'fignos-star-name' in meta:
-        tmp = get_meta(meta, 'fignos-star-name')
+    if 'tablenos-star-name' in meta:
+        tmp = get_meta(meta, 'tablenos-star-name')
         old_starname = copy.deepcopy(starname)
         if isinstance(tmp, list):
             starname = tmp
@@ -494,7 +542,7 @@ def process(meta):
         for name in starname:
             assert isinstance(name, STRTYPES)
 
-    for name in ['fignos-number-by-section', 'xnos-number-by-section']:
+    for name in ['tablenos-number-by-section', 'xnos-number-by-section']:
         if name in meta:
             numbersections = check_bool(get_meta(meta, name))
             break
@@ -503,16 +551,17 @@ def process(meta):
         secoffset = int(get_meta(meta, 'xnos-number-offset'))
 
 def add_tex(meta):
-    """Adds tex to the meta data."""
+    """Adds text to the meta data."""
 
     # pylint: disable=too-many-boolean-expressions
-    warnings = warninglevel == 2 and targets and \
-      (pandocxnos.cleveref_required() or has_unnumbered_figures or
-       plusname_changed or starname_changed or has_tagged_figures or
-       captionname_changed or numbersections or secoffset)
+    warnings = warninglevel == 2 and (has_unnumbered_tables or \
+      (targets and (pandocxnos.cleveref_required() or \
+                    separator_changed or plusname_changed or starname_changed \
+                    or has_tagged_tables or captionname_changed or numbersections \
+                    or secoffset)))
     if warnings:
         msg = textwrap.dedent("""\
-                  pandoc-fignos: Wrote the following blocks to
+                  pandoc-tablenos: Wrote the following blocks to
                   header-includes.  If you use pandoc's
                   --include-in-header option then you will need to
                   manually include these yourself.
@@ -528,40 +577,42 @@ def add_tex(meta):
 
     if pandocxnos.cleveref_required() and targets:
         tex = """
-            %%%% pandoc-fignos: required package
+            %%%% pandoc-tablenos: required package
             \\usepackage%s{cleveref}
         """ % ('[capitalise]' if capitalise else '')
         pandocxnos.add_to_header_includes(
-            meta, 'tex', tex, regex=r'\\usepackage(\[[\w\s,]*\])?\{cleveref\}')
+            meta, 'tex', tex,
+            regex=r'\\usepackage(\[[\w\s,]*\])?\{cleveref\}')
 
-    if has_unnumbered_figures or (separator_changed and targets):
+    if has_unnumbered_tables or (separator_changed and targets):
         tex = """
-            %%%% pandoc-fignos: required package
+            %% pandoc-tablenos: required package
             \\usepackage{caption}
         """
         pandocxnos.add_to_header_includes(
-            meta, 'tex', tex, regex=r'\\usepackage(\[[\w\s,]*\])?\{caption\}')
+            meta, 'tex', tex,
+            regex=r'\\usepackage(\[[\w\s,]*\])?\{caption\}')
 
     if plusname_changed and targets:
         tex = """
-            %%%% pandoc-fignos: change cref names
-            \\crefname{figure}{%s}{%s}
+            %%%% pandoc-tablenos: change cref names
+            \\crefname{table}{%s}{%s}
         """ % (plusname[0], plusname[1])
         pandocxnos.add_to_header_includes(meta, 'tex', tex)
 
     if starname_changed and targets:
         tex = """
-            %%%% pandoc-fignos: change Cref names
-            \\Crefname{figure}{%s}{%s}
+            %%%% pandoc-tablenos: change Cref names
+            \\Crefname{table}{%s}{%s}
         """ % (starname[0], starname[1])
         pandocxnos.add_to_header_includes(meta, 'tex', tex)
 
-    if has_unnumbered_figures:
+    if has_unnumbered_tables:
         pandocxnos.add_to_header_includes(
             meta, 'tex', NO_PREFIX_CAPTION_ENV_TEX)
 
-    if has_tagged_figures and targets:
-        pandocxnos.add_to_header_includes(meta, 'tex', TAGGED_FIGURE_ENV_TEX)
+    if has_tagged_tables and targets:
+        pandocxnos.add_to_header_includes(meta, 'tex', TAGGED_TABLE_ENV_TEX)
 
     if captionname_changed and targets:
         pandocxnos.add_to_header_includes(
@@ -572,7 +623,8 @@ def add_tex(meta):
             meta, 'tex', CAPTION_SEPARATOR_TEX % separator)
 
     if numbersections and targets:
-        pandocxnos.add_to_header_includes(meta, 'tex', NUMBER_BY_SECTION_TEX)
+        pandocxnos.add_to_header_includes(
+            meta, 'tex', NUMBER_BY_SECTION_TEX)
 
     if secoffset and targets:
         pandocxnos.add_to_header_includes(
@@ -588,11 +640,11 @@ def main(stdin=STDIN, stdout=STDOUT, stderr=STDERR):
 
     # pylint: disable=global-statement
     global PANDOCVERSION
-    global Image
+    global Table, AttrTable
 
     # Read the command-line arguments
     parser = argparse.ArgumentParser(\
-      description='Pandoc figure numbers filter.')
+      description='Pandoc table numbers filter.')
     parser.add_argument(\
       '--version', action='version',
       version='%(prog)s {version}'.format(version=__version__))
@@ -605,41 +657,37 @@ def main(stdin=STDIN, stdout=STDOUT, stderr=STDERR):
     doc = json.loads(stdin.read())
 
     # Initialize pandocxnos
+    # pylint: disable=too-many-function-args
     PANDOCVERSION = pandocxnos.init(args.pandocversion, doc)
 
     # Element primitives
-    if version(PANDOCVERSION) < version('1.16'):
-        Image = elt('Image', 2)
+    AttrTable = elt('Table', 6)
+    if version(PANDOCVERSION) >= version('2.10'):
+        Table = elt('Table', 6)
 
     # Chop up the doc
-    meta = doc['meta'] if version(PANDOCVERSION) >= version('1.18') \
+    meta = doc['meta'] if version(PANDOCVERSION) >= version('1.18')\
       else doc[0]['unMeta']
-    blocks = doc['blocks'] if version(PANDOCVERSION) >= version('1.18') \
+    blocks = doc['blocks'] if version(PANDOCVERSION) >= version('1.18')\
       else doc[1:]
 
     # Process the metadata variables
     process(meta)
 
     # First pass
-    replace = version(PANDOCVERSION) >= version('1.16')
-    attach_attrs_image = attach_attrs_factory(Image,
-                                              extract_attrs=_extract_attrs,
-                                              replace=replace)
-    detach_attrs_image = detach_attrs_factory(Image)
-    insert_secnos_img = insert_secnos_factory(Image)
-    delete_secnos_img = delete_secnos_factory(Image)
-    insert_secnos_div = insert_secnos_factory(Div)
-    delete_secnos_div = delete_secnos_factory(Div)
+    detach_attrs_table = detach_attrs_factory(Table)
+    insert_secnos = insert_secnos_factory(Table)
+    delete_secnos = delete_secnos_factory(Table)
+    actions = [attach_attrs_table, insert_secnos, process_tables, delete_secnos]
+    if version(PANDOCVERSION) < version('2.10'):
+        actions.append(detach_attrs_table)
     altered = functools.reduce(lambda x, action: walk(x, action, fmt, meta),
-                               [attach_attrs_image,
-                                insert_secnos_img, insert_secnos_div,
-                                process_figures,
-                                delete_secnos_img, delete_secnos_div,
-                                detach_attrs_image], blocks)
+                               actions, blocks)
 
     # Second pass
     process_refs = process_refs_factory(LABEL_PATTERN, targets.keys())
-    replace_refs = replace_refs_factory(targets, cleveref, False,
+    replace_refs = replace_refs_factory(targets,
+                                        cleveref, False,
                                         plusname if not capitalise \
                                         or plusname_changed else
                                         [name.title() for name in plusname],

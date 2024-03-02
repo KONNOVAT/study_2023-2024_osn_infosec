@@ -465,7 +465,7 @@ def add_html(meta, fmt):
           (fmt == 'html' and version(PANDOCVERSION) < version('2.0'))
         attr = ' type="text/css"' if cond else ''
         pandocxnos.add_to_header_includes(meta, 'html',
-                                          EQUATION_STYLE_HTML%attr)
+                                          EQUATION_STYLE_HTML % attr)
 
 # pylint: disable=too-many-locals, unused-argument
 def main(stdin=STDIN, stdout=STDOUT, stderr=STDERR):
